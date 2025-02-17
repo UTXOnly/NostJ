@@ -2,7 +2,7 @@ package nostj.websockethandler.models;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
-import java.util.Map;  // ✅ Fix: Add missing imports
+import java.util.Map;
 
 public class ExtractedResponseList {
     @JsonProperty("event")
@@ -12,7 +12,7 @@ public class ExtractedResponseList {
     private String subscriptionId;
 
     @JsonProperty("results_json")
-    private List<Map<String, Object>> resultsJson;  // ✅ Keep your original variable name
+    private List<Map<String, Object>> resultsJson;
 
     public String getEvent() {
         return event;
@@ -22,7 +22,7 @@ public class ExtractedResponseList {
         return subscriptionId;
     }
 
-    public List<Map<String, Object>> getResultsJson() {  // ✅ Keep your original method name
+    public List<Map<String, Object>> getResultsJson() {
         return resultsJson;
     }
 }

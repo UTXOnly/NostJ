@@ -25,9 +25,9 @@ dependencies {
     // Database Driver
     implementation("org.postgresql:postgresql:42.6.0")
 
-    // ✅ FIXED: Redis Client (Lettuce for Async Redis Commands)
-    //implementation("io.lettuce.core:lettuce-core:6.2.6")  // Replaced with available stable version
+    // Async Redis client
     implementation("io.lettuce:lettuce-core:6.3.2.RELEASE")
+    
     // Redis (Jedis) for Pub/Sub
     implementation("redis.clients:jedis:5.1.0")
 

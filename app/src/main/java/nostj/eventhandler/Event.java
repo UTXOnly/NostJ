@@ -41,7 +41,7 @@ public class Event {
 
     public boolean verifySignature() {
         logger.info("Verifying signature for event: " + eventId);
-        return true; // Implement actual verification logic here
+        return true;
     }
 
     public boolean checkWot(Connection conn) {

@@ -39,7 +39,7 @@ public class WebSocketHandler extends TextWebSocketHandler {
         startRedisListener();
     }
 
-    /** ✅ Fix: Add `RedisSubscriber` class */
+    
     private class RedisSubscriber extends JedisPubSub {
         @Override
         public void onMessage(String channel, String message) {
@@ -172,7 +172,7 @@ public class WebSocketHandler extends TextWebSocketHandler {
                     sendToClient(session, objectMapper.writeValueAsString(List.of("OK", "Events deleted")));
                 } else {
                     if (event.addEvent(conn)) {
-                        publishToRedisAsync(event.getEventMap()); // ✅ Ensure `getEventMap()` is used
+                        publishToRedisAsync(event.getEventMap());
                         sendToClient(session, objectMapper.writeValueAsString(List.of("OK", event.getId())));
                     } else {
                         sendToClient(session, objectMapper.writeValueAsString(List.of("ERROR", "Duplicate event")));
@@ -197,7 +197,6 @@ public class WebSocketHandler extends TextWebSocketHandler {
         }, executorService);
     }
 
-    /** ✅ Fix: Add `sendToClient` method */
     private void sendToClient(WebSocketSession session, String message) {
         synchronized (session) {
             try {

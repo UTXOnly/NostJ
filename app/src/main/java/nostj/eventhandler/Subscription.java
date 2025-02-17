@@ -48,7 +48,6 @@ public class Subscription {
         List<Map<String, Object>> events = new ArrayList<>();
         String cacheKey = generateCacheKey();
 
-        // ✅ Check Redis cache first
         try (Jedis jedis = jedisPool.getResource()) {
             String cachedResults = jedis.get(cacheKey);
             if (cachedResults != null) {
@@ -59,7 +58,7 @@ public class Subscription {
             logger.warning("Redis cache lookup failed: " + e.getMessage());
         }
 
-        // ✅ Build SQL query dynamically
+        // Build SQL query dynamically
         StringBuilder query = new StringBuilder("SELECT * FROM events");
         List<Object> params = new ArrayList<>();
         List<String> conditions = new ArrayList<>();
@@ -104,7 +103,6 @@ public class Subscription {
 
         query.append(" ORDER BY created_at DESC LIMIT 100");
 
-        // ✅ Log the query before execution
         logger.info("Executing Query: " + query.toString());
         logger.info("Query Parameters: " + params);
 
@@ -136,7 +134,7 @@ public class Subscription {
 
         logger.info("Fetched " + events.size() + " events for filters: " + filters);
 
-        // ✅ Store results in Redis cache
+        // Store results in Redis cache
         try (Jedis jedis = jedisPool.getResource()) {
             jedis.setex(cacheKey, 240, objectMapper.writeValueAsString(events));  // Cache for 4 minutes
             logger.info("Stored query results in Redis for key: " + cacheKey);
