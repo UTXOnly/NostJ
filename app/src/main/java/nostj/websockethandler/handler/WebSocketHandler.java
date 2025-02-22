@@ -99,6 +99,17 @@ public class WebSocketHandler extends TextWebSocketHandler {
         });
     }
 
+    private void handleClose(WebSocketSession session) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                logger.info("Removing websocket subscriptions: " + session.getId());
+                sessionSubscriptions.values().remove(session.getId());
+            } catch (Exception e) {
+                logger.severe("Error closing WebSocket session: " + e.getMessage());
+            }
+        });
+    }
+
     private String getClientIdentifier(WebSocketSession session) {
         try {
             return session.getRemoteAddress().toString();
@@ -122,7 +133,7 @@ public class WebSocketHandler extends TextWebSocketHandler {
                         handleEvent(wsMessage, session);
                         break;
                     case "CLOSE":
-                        afterConnectionClosed(session, CloseStatus.NORMAL);
+                        handleClose(session);
                         break;
                     default:
                         logger.warning("Unknown event type: " + wsMessage.getEventType());

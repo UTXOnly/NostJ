@@ -20,9 +20,8 @@ public class Subscription {
 
     public Subscription(Map<String, Object> subscriptionData, JedisPool jedisPool) {
         this.jedisPool = jedisPool;
-        this.filters = subscriptionData.containsKey("event_dict") ?
-                (Map<String, Object>) ((List<?>) subscriptionData.get("event_dict")).get(0) :
-                new HashMap<>();
+        this.filters = subscriptionData;
+
     }
 
     /**
