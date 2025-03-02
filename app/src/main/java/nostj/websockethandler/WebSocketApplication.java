@@ -1,17 +1,15 @@
 package nostj.websockethandler;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
+import io.vertx.core.Vertx;
+import io.vertx.pgclient.PgConnectOptions;
+import io.vertx.sqlclient.Pool;
+import io.vertx.sqlclient.PoolOptions;
 import nostj.websockethandler.handler.WebSocketHandler;
-
-import javax.sql.DataSource;
-import java.sql.Connection;
-import java.sql.SQLException;
 
 public class WebSocketApplication {
     public static void main(String[] args) {
         System.out.println("Starting WebSocketApplication...");
-
+    
         // Print environment variables for debugging
         System.out.println("REDIS_HOST: " + System.getenv("REDIS_HOST"));
         System.out.println("REDIS_PORT: " + System.getenv("REDIS_PORT"));
@@ -19,16 +17,10 @@ public class WebSocketApplication {
         System.out.println("DB_URL: " + System.getenv("DB_URL"));
         System.out.println("DB_USER: " + System.getenv("DB_USER"));
         System.out.println("DB_PASSWORD: " + (System.getenv("DB_PASSWORD") != null ? "******" : "NOT SET"));
-
+    
         // Validate and parse port
-        int port;
-        try {
-            port = Integer.parseInt(System.getenv("WS_PORT"));
-        } catch (NumberFormatException e) {
-            System.err.println("Invalid WS_PORT: " + System.getenv("WS_PORT") + ". Defaulting to 8008.");
-            port = 8008;
-        }
-
+        int port = parsePort(System.getenv("WS_PORT"), 8008);
+    
         // Construct Redis URI
         String redisHost = System.getenv("REDIS_HOST");
         String redisPort = System.getenv("REDIS_PORT");
@@ -38,32 +30,26 @@ public class WebSocketApplication {
         }
         String redisUri = "redis://" + redisHost + ":" + redisPort;
         System.out.println("Using Redis URI: " + redisUri);
-
-        // Initialize DataSource using HikariCP
-        DataSource dataSource = createDataSource();
-
-        // Validate PostgreSQL connection
-        try (Connection conn = dataSource.getConnection()) {
-            System.out.println("Successfully connected to PostgreSQL database.");
-        } catch (SQLException e) {
-            System.err.println("ERROR: Unable to connect to PostgreSQL database: " + e.getMessage());
-            System.exit(1);
-        }
-
+    
+        // Initialize Vert.x and PostgreSQL connection pool
+        Vertx vertx = Vertx.vertx();
+        Pool pgPool = createPgPool(vertx);
+    
         // Start WebSocket Server
-        WebSocketHandler server = new WebSocketHandler(port, dataSource, redisUri);
+        WebSocketHandler server = new WebSocketHandler(vertx, port, pgPool, redisUri);
+        System.out.println("Starting WebSocket server on port " + port);
+        
         try {
-            System.out.println("Starting WebSocket server on port " + port);
             server.start();
         } catch (InterruptedException e) {
-            System.err.println("ERROR: WebSocket server interrupted.");
-            e.printStackTrace();
-            System.exit(1);
+            System.err.println("WebSocket server was interrupted: " + e.getMessage());
+            Thread.currentThread().interrupt(); // Preserve interrupt status
         }
     }
+    
 
-    private static DataSource createDataSource() {
-        String dbUrl = System.getenv("DB_URL");
+    private static Pool createPgPool(Vertx vertx) {
+        String dbUrl = System.getenv("DB_URL").replace("jdbc:postgresql://", ""); // Remove JDBC prefix
         String dbUser = System.getenv("DB_USER");
         String dbPassword = System.getenv("DB_PASSWORD");
 
@@ -74,15 +60,24 @@ public class WebSocketApplication {
 
         System.out.println("Using database: " + dbUrl + " with user: " + dbUser);
 
-        HikariConfig config = new HikariConfig();
-        config.setJdbcUrl(dbUrl);
-        config.setUsername(dbUser);
-        config.setPassword(dbPassword);
-        config.setMaximumPoolSize(10);
-        config.setMinimumIdle(2);
-        config.setIdleTimeout(30000);
-        config.setMaxLifetime(600000);
+        PgConnectOptions connectOptions = new PgConnectOptions()
+            .setHost(dbUrl.split(":")[0])  // Extract host
+            .setPort(Integer.parseInt(dbUrl.split(":")[1].split("/")[0])) // Extract port
+            .setDatabase(dbUrl.split("/")[1]) // Extract database name
+            .setUser(dbUser)
+            .setPassword(dbPassword)
+            .setCachePreparedStatements(true);
 
-        return new HikariDataSource(config);
+        PoolOptions poolOptions = new PoolOptions().setMaxSize(10);
+        return Pool.pool(vertx, connectOptions, poolOptions);
+    }
+
+    private static int parsePort(String portStr, int defaultPort) {
+        try {
+            return Integer.parseInt(portStr);
+        } catch (NumberFormatException e) {
+            System.err.println("Invalid WS_PORT: " + portStr + ". Defaulting to " + defaultPort);
+            return defaultPort;
+        }
     }
 }

@@ -14,12 +14,9 @@ import io.lettuce.core.RedisClient;
 import io.lettuce.core.pubsub.RedisPubSubAdapter;
 import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 import io.lettuce.core.pubsub.api.async.RedisPubSubAsyncCommands;
-import nostj.eventhandler.Subscription;
-import nostj.websockethandler.models.WebsocketMessages;
+import io.vertx.core.Vertx;
+import io.vertx.sqlclient.*;
 
-import javax.sql.DataSource;
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
@@ -29,18 +26,17 @@ public class WebSocketHandler {
     private static final Logger logger = Logger.getLogger(WebSocketHandler.class.getName());
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final String REDIS_CHANNEL = "new_events_channel";
-    private static final boolean WOT_ENABLED = Boolean.parseBoolean(System.getenv("WOT_ENABLED"));
 
     private final int port;
-    private final DataSource dataSource;
+    private final Pool pgPool;
     private final RedisClient redisClient;
     private final StatefulRedisPubSubConnection<String, String> redisConnection;
     private final RedisPubSubAsyncCommands<String, String> redisAsync;
     private final Map<Channel, Set<String>> sessionSubscriptions = new ConcurrentHashMap<>();
 
-    public WebSocketHandler(int port, DataSource dataSource, String redisUri) {
+    public WebSocketHandler(Vertx vertx, int port, Pool pgPool, String redisUri) {
         this.port = port;
-        this.dataSource = dataSource;
+        this.pgPool = pgPool;
         this.redisClient = RedisClient.create(redisUri);
         this.redisConnection = redisClient.connectPubSub();
         this.redisAsync = redisConnection.async();
@@ -147,65 +143,64 @@ public class WebSocketHandler {
 
         private void processMessage(Channel channel, String message) {
             try {
-                WebsocketMessages wsMessage = new WebsocketMessages(objectMapper.readValue(message, List.class));
-                switch (wsMessage.getEventType()) {
+                List<Object> parsedMessage = objectMapper.readValue(message, List.class);
+                String eventType = (String) parsedMessage.get(0);
+                switch (eventType) {
                     case "REQ":
-                        handleSubscription(wsMessage, channel);
+                        handleSubscription(parsedMessage, channel);
                         break;
                     case "EVENT":
-                        handleEvent(wsMessage, channel);
+                        handleEvent(parsedMessage, channel);
                         break;
                     case "CLOSE":
-                        removeSubscription(wsMessage, channel);
+                        removeSubscription(parsedMessage, channel);
                         break;
                     default:
-                        logger.warning("Unknown event type: " + wsMessage.getEventType());
+                        logger.warning("Unknown event type: " + eventType);
                 }
             } catch (Exception e) {
                 logger.severe("Error processing WebSocket message: " + e.getMessage());
             }
         }
 
-        private void handleEvent(WebsocketMessages wsMessage, Channel channel) {
+        private void handleSubscription(List<Object> parsedMessage, Channel channel) {
+            String subId = (String) parsedMessage.get(1);
+
+            sessionSubscriptions.computeIfAbsent(channel, k -> new HashSet<>()).add(subId);
+            String query = "SELECT * FROM events ORDER BY created_at DESC LIMIT 10";
+
+            pgPool.query(query).execute(ar -> {
+                if (ar.succeeded()) {
+                    RowSet<Row> rows = ar.result();
+                    for (Row row : rows) {
+                        sendToClient(channel, List.of("EVENT", subId, row.toJson()));
+                    }
+                    sendToClient(channel, List.of("EOSE", subId));
+                } else {
+                    logger.severe("Database query failed: " + ar.cause().getMessage());
+                }
+            });
+        }
+
+        private void handleEvent(List<Object> parsedMessage, Channel channel) {
             try {
-                logger.info("Handling WebSocket event: " + wsMessage.getEventPayload());
-                sendToClient(channel, List.of("EVENT_HANDLED", wsMessage.getEventPayload()));
+                logger.info("Handling WebSocket event: " + parsedMessage);
+                sendToClient(channel, List.of("EVENT_HANDLED", parsedMessage));
             } catch (Exception e) {
                 logger.severe("Error handling WebSocket event: " + e.getMessage());
             }
         }
 
-        private void handleSubscription(WebsocketMessages wsMessage, Channel channel) {
-            try (Connection conn = dataSource.getConnection()) {
-                sessionSubscriptions.computeIfAbsent(channel, k -> new HashSet<>()).add(wsMessage.getSubscriptionId());
-                Subscription subscription = new Subscription(wsMessage.getEventPayload(), redisAsync);
-
-                subscription.fetchEvents(conn)
-                        .thenAccept(events -> sendEventsToClient(events, wsMessage.getSubscriptionId(), channel))
-                        .exceptionally(ex -> {
-                            logger.severe("Error processing subscription: " + ex.getMessage());
-                            return null;
-                        });
-
-            } catch (SQLException e) {
-                logger.severe("Database connection error: " + e.getMessage());
-            }
-        }
-
-        private void removeSubscription(WebsocketMessages wsMessage, Channel channel) {
+        private void removeSubscription(List<Object> parsedMessage, Channel channel) {
+            String subId = (String) parsedMessage.get(1);
             Set<String> subscriptions = sessionSubscriptions.get(channel);
             if (subscriptions != null) {
-                subscriptions.remove(wsMessage.getSubscriptionId());
+                subscriptions.remove(subId);
                 if (subscriptions.isEmpty()) {
                     sessionSubscriptions.remove(channel);
                 }
-                logger.info("Removed subscription: " + wsMessage.getSubscriptionId());
+                logger.info("Removed subscription: " + subId);
             }
-        }
-
-        private void sendEventsToClient(List<Map<String, Object>> events, String subId, Channel channel) {
-            events.forEach(event -> sendToClient(channel, List.of("EVENT", subId, event)));
-            sendToClient(channel, List.of("EOSE", subId));
         }
     }
 }

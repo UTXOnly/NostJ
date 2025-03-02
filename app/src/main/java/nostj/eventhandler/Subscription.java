@@ -66,10 +66,26 @@ public class Subscription {
 
     private CompletableFuture<List<Map<String, Object>>> fetchFromDatabase(Connection conn, String cacheKey) {
         List<Map<String, Object>> events = new ArrayList<>();
+        
+        if (conn == null) {
+            logger.severe("Database connection is null. Cannot execute query.");
+            return CompletableFuture.completedFuture(events);
+        }
+    
+        try {
+            if (conn.isClosed()) {
+                logger.severe("Database connection is closed. Attempting to reconnect...");
+                return CompletableFuture.completedFuture(events);
+            }
+        } catch (SQLException e) {
+            logger.severe("Error checking database connection state: " + e.getMessage());
+            return CompletableFuture.completedFuture(events);
+        }
+    
         StringBuilder query = new StringBuilder("SELECT * FROM events");
         List<Object> params = new ArrayList<>();
         List<String> conditions = new ArrayList<>();
-
+    
         if (filters.containsKey("ids")) {
             List<String> ids = (List<String>) filters.get("ids");
             if (!ids.isEmpty()) {
@@ -77,7 +93,7 @@ public class Subscription {
                 params.add(ids.toArray(new String[0]));
             }
         }
-
+    
         if (filters.containsKey("authors")) {
             List<String> authors = (List<String>) filters.get("authors");
             if (!authors.isEmpty()) {
@@ -85,7 +101,7 @@ public class Subscription {
                 params.add(authors.toArray(new String[0]));
             }
         }
-
+    
         if (filters.containsKey("kinds")) {
             List<Integer> kinds = (List<Integer>) filters.get("kinds");
             if (!kinds.isEmpty()) {
@@ -93,28 +109,30 @@ public class Subscription {
                 params.add(kinds.toArray(new Integer[0]));
             }
         }
-
+    
         if (filters.containsKey("since")) {
             conditions.add("created_at >= ?");
             params.add(((Number) filters.get("since")).longValue());
         }
-
+    
         if (filters.containsKey("until")) {
             conditions.add("created_at <= ?");
             params.add(((Number) filters.get("until")).longValue());
         }
-
+    
         if (!conditions.isEmpty()) {
             query.append(" WHERE ").append(String.join(" AND ", conditions));
         }
-
+    
         query.append(" ORDER BY created_at DESC LIMIT 100");
-
+    
         logger.info("Executing Query: " + query);
         logger.info("Query Parameters: " + params);
-
+    
         return CompletableFuture.supplyAsync(() -> {
-            try (PreparedStatement stmt = conn.prepareStatement(query.toString())) {
+            try (Connection newConn = conn.isValid(2) ? conn : conn.getMetaData().getConnection();
+                 PreparedStatement stmt = newConn.prepareStatement(query.toString())) {
+    
                 for (int i = 0; i < params.size(); i++) {
                     if (params.get(i) instanceof Long) {
                         stmt.setLong(i + 1, (Long) params.get(i));
@@ -124,7 +142,7 @@ public class Subscription {
                         stmt.setObject(i + 1, params.get(i));
                     }
                 }
-
+    
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
                         Map<String, Object> event = new HashMap<>();
@@ -145,6 +163,7 @@ public class Subscription {
             return events;
         }).thenCompose(eventList -> storeInCache(cacheKey, eventList));
     }
+    
 
     private CompletableFuture<List<Map<String, Object>>> storeInCache(String cacheKey, List<Map<String, Object>> events) {
         try {

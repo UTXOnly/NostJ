@@ -34,6 +34,12 @@ dependencies {
     implementation("org.slf4j:slf4j-api:2.0.7")
     implementation("ch.qos.logback:logback-classic:1.4.8")
 
+
+    implementation("io.vertx:vertx-pg-client:4.5.1")
+    implementation ("com.ongres.scram:client:2.1") // Add this for SCRAM support
+
+
+
     // Unit Testing (JUnit 5)
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
 }
