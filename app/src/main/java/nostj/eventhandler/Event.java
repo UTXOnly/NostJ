@@ -1,15 +1,14 @@
 package nostj.eventhandler;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.util.List;
-import java.util.Map;
-import java.util.HashMap;
-import java.util.logging.Logger;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.vertx.pgclient.PgPool;
+import io.vertx.sqlclient.Tuple;
+import io.vertx.sqlclient.Row;
+import io.vertx.sqlclient.RowSet;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.logging.Logger;
 
 public class Event {
     private String eventId;
@@ -44,40 +43,50 @@ public class Event {
         return true;
     }
 
-    public boolean checkWot(Connection conn) {
-        String query = "SELECT pubkey FROM trust_network WHERE pubkey = ?";
-        try (PreparedStatement stmt = conn.prepareStatement(query)) {
-            stmt.setString(1, this.pubkey);
-            try (ResultSet rs = stmt.executeQuery()) {
-                boolean exists = rs.next();
+    public CompletableFuture<Boolean> checkWot(PgPool pgPool) {
+        String query = "SELECT pubkey FROM trust_network WHERE pubkey = $1";
+
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
+        pgPool.preparedQuery(query)
+            .execute(Tuple.of(this.pubkey))
+            .onSuccess(rows -> {
+                boolean exists = rows.iterator().hasNext();
                 if (!exists) {
                     logger.warning("Event rejected due to Web of Trust filter for pubkey: " + this.pubkey);
                 }
-                return exists;
-            }
-        } catch (SQLException e) {
-            logger.severe("Database error while checking WoT: " + e.getMessage());
-            return false;
-        }
+                future.complete(exists);
+            })
+            .onFailure(err -> {
+                logger.severe("Database error while checking WoT: " + err.getMessage());
+                future.complete(false);
+            });
+
+        return future;
     }
 
-    public boolean addEvent(Connection conn) {
-        String insertQuery = "INSERT INTO events (id, pubkey, kind, created_at, tags, content, sig) VALUES (?, ?, ?, ?, ?::jsonb, ?, ?) ON CONFLICT DO NOTHING";
-        try (PreparedStatement stmt = conn.prepareStatement(insertQuery)) {
-            stmt.setString(1, eventId);
-            stmt.setString(2, pubkey);
-            stmt.setInt(3, kind);
-            stmt.setLong(4, createdAt);
-            stmt.setString(5, convertTagsToJson());
-            stmt.setString(6, content);
-            stmt.setString(7, sig);
+    public CompletableFuture<Boolean> addEvent(PgPool pgPool) {
+        String insertQuery = "INSERT INTO events (id, pubkey, kind, created_at, tags, content, sig) " +
+                "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7) " +
+                "ON CONFLICT DO NOTHING";
 
-            int rowsInserted = stmt.executeUpdate();
-            return rowsInserted > 0;
-        } catch (SQLException e) {
-            logger.severe("Error inserting event into DB: " + e.getMessage());
-            return false;
-        }
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
+        pgPool.preparedQuery(insertQuery)
+            .execute(Tuple.of(eventId, pubkey, kind, createdAt, convertTagsToJson(), content, sig))
+            .onSuccess(rows -> {
+                boolean inserted = rows.rowCount() > 0;
+                if (inserted) {
+                    logger.info("Event successfully added to DB: " + eventId);
+                } else {
+                    logger.warning("Duplicate event detected: " + eventId);
+                }
+                future.complete(inserted);
+            })
+            .onFailure(err -> {
+                logger.severe("Error inserting event into DB: " + err.getMessage());
+                future.complete(false);
+            });
+
+        return future;
     }
 
     private String convertTagsToJson() {
@@ -90,15 +99,22 @@ public class Event {
         }
     }
 
-    public void deleteEvent(Connection conn) {
-        String deleteQuery = "DELETE FROM events WHERE id = ?";
-        try (PreparedStatement stmt = conn.prepareStatement(deleteQuery)) {
-            stmt.setString(1, this.eventId);
-            int rowsDeleted = stmt.executeUpdate();
-            logger.info("Deleted " + rowsDeleted + " event(s) with id: " + this.eventId);
-        } catch (SQLException e) {
-            logger.severe("Error deleting event from DB: " + e.getMessage());
-        }
+    public CompletableFuture<Void> deleteEvent(PgPool pgPool) {
+        String deleteQuery = "DELETE FROM events WHERE id = $1";
+
+        CompletableFuture<Void> future = new CompletableFuture<>();
+        pgPool.preparedQuery(deleteQuery)
+            .execute(Tuple.of(this.eventId))
+            .onSuccess(rows -> {
+                logger.info("Deleted " + rows.rowCount() + " event(s) with id: " + this.eventId);
+                future.complete(null);
+            })
+            .onFailure(err -> {
+                logger.severe("Error deleting event from DB: " + err.getMessage());
+                future.completeExceptionally(err);
+            });
+
+        return future;
     }
 
     public Map<String, Object> getEventMap() {

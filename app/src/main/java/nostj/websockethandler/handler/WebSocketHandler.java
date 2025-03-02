@@ -16,6 +16,8 @@ import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 import io.lettuce.core.pubsub.api.async.RedisPubSubAsyncCommands;
 import io.vertx.core.Vertx;
 import io.vertx.sqlclient.*;
+import nostj.eventhandler.Subscription;
+import nostj.websockethandler.models.WebsocketMessages;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -165,22 +167,24 @@ public class WebSocketHandler {
 
         private void handleSubscription(List<Object> parsedMessage, Channel channel) {
             String subId = (String) parsedMessage.get(1);
-
+            Map<String, Object> filter = (Map<String, Object>) parsedMessage.get(2);
+        
             sessionSubscriptions.computeIfAbsent(channel, k -> new HashSet<>()).add(subId);
-            String query = "SELECT * FROM events ORDER BY created_at DESC LIMIT 10";
-
-            pgPool.query(query).execute(ar -> {
-                if (ar.succeeded()) {
-                    RowSet<Row> rows = ar.result();
-                    for (Row row : rows) {
-                        sendToClient(channel, List.of("EVENT", subId, row.toJson()));
+            Subscription subscription = new Subscription(filter, redisAsync);
+        
+            subscription.fetchEvents(pgPool)
+                .thenAccept(events -> {
+                    for (Map<String, Object> event : events) {
+                        sendToClient(channel, List.of("EVENT", subId, event));
                     }
                     sendToClient(channel, List.of("EOSE", subId));
-                } else {
-                    logger.severe("Database query failed: " + ar.cause().getMessage());
-                }
-            });
+                })
+                .exceptionally(ex -> {
+                    logger.severe("Error processing subscription: " + ex.getMessage());
+                    return null;
+                });
         }
+        
 
         private void handleEvent(List<Object> parsedMessage, Channel channel) {
             try {
