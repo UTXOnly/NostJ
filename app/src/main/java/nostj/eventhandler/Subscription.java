@@ -1,27 +1,25 @@
 package nostj.eventhandler;
 
-import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisPool;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import io.lettuce.core.api.async.RedisAsyncCommands;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.sql.*;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
 
 public class Subscription {
     private static final Logger logger = Logger.getLogger(Subscription.class.getName());
     private final Map<String, Object> filters;
-    private final JedisPool jedisPool;
+    private final RedisAsyncCommands<String, String> redisAsync;
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
-    public Subscription(Map<String, Object> subscriptionData, JedisPool jedisPool) {
-        this.jedisPool = jedisPool;
+    public Subscription(Map<String, Object> subscriptionData, RedisAsyncCommands<String, String> redisAsync) {
         this.filters = subscriptionData;
-
+        this.redisAsync = redisAsync;
     }
 
     /**
@@ -37,27 +35,37 @@ public class Subscription {
                 hexString.append(String.format("%02x", b));
             }
             return "query_cache:" + hexString;
-        } catch (JsonProcessingException | NoSuchAlgorithmException e) {
+        } catch (Exception e) {
             logger.severe("Error generating cache key: " + e.getMessage());
             return "query_cache:default"; // Fallback cache key
         }
     }
 
-    public List<Map<String, Object>> fetchEvents(Connection conn) throws SQLException {
-        List<Map<String, Object>> events = new ArrayList<>();
+    /**
+     * Fetches events from either Redis cache (if available) or the database.
+     */
+    public CompletableFuture<List<Map<String, Object>>> fetchEvents(Connection conn) {
         String cacheKey = generateCacheKey();
 
-        try (Jedis jedis = jedisPool.getResource()) {
-            String cachedResults = jedis.get(cacheKey);
-            if (cachedResults != null) {
-                logger.info("Cache hit for filters: " + filters);
-                return objectMapper.readValue(cachedResults, List.class);
-            }
-        } catch (Exception e) {
-            logger.warning("Redis cache lookup failed: " + e.getMessage());
-        }
+        return redisAsync.get(cacheKey).toCompletableFuture()
+            .thenCompose(cachedResults -> {
+                if (cachedResults != null) {
+                    try {
+                        List<Map<String, Object>> cachedEvents = objectMapper.readValue(cachedResults, List.class);
+                        return CompletableFuture.completedFuture(cachedEvents);
+                    } catch (JsonProcessingException e) {
+                        logger.warning("Failed to parse cached results: " + e.getMessage());
+                    }
+                }
+                return fetchFromDatabase(conn, cacheKey);
+            }).exceptionally(ex -> {
+                logger.warning("Redis fetch failed: " + ex.getMessage());
+                return new ArrayList<>();
+            });
+    }
 
-        // Build SQL query dynamically
+    private CompletableFuture<List<Map<String, Object>>> fetchFromDatabase(Connection conn, String cacheKey) {
+        List<Map<String, Object>> events = new ArrayList<>();
         StringBuilder query = new StringBuilder("SELECT * FROM events");
         List<Object> params = new ArrayList<>();
         List<String> conditions = new ArrayList<>();
@@ -102,45 +110,61 @@ public class Subscription {
 
         query.append(" ORDER BY created_at DESC LIMIT 100");
 
-        logger.info("Executing Query: " + query.toString());
+        logger.info("Executing Query: " + query);
         logger.info("Query Parameters: " + params);
 
-        try (PreparedStatement stmt = conn.prepareStatement(query.toString())) {
-            for (int i = 0; i < params.size(); i++) {
-                if (params.get(i) instanceof Long) {
-                    stmt.setLong(i + 1, (Long) params.get(i));
-                } else if (params.get(i) instanceof Integer) {
-                    stmt.setInt(i + 1, (Integer) params.get(i));
-                } else {
-                    stmt.setObject(i + 1, params.get(i));
+        return CompletableFuture.supplyAsync(() -> {
+            try (PreparedStatement stmt = conn.prepareStatement(query.toString())) {
+                for (int i = 0; i < params.size(); i++) {
+                    if (params.get(i) instanceof Long) {
+                        stmt.setLong(i + 1, (Long) params.get(i));
+                    } else if (params.get(i) instanceof Integer) {
+                        stmt.setInt(i + 1, (Integer) params.get(i));
+                    } else {
+                        stmt.setObject(i + 1, params.get(i));
+                    }
                 }
-            }
 
-            try (ResultSet rs = stmt.executeQuery()) {
-                while (rs.next()) {
-                    Map<String, Object> event = new HashMap<>();
-                    event.put("id", rs.getString("id"));
-                    event.put("pubkey", rs.getString("pubkey"));
-                    event.put("kind", rs.getInt("kind"));
-                    event.put("created_at", rs.getLong("created_at"));
-                    event.put("tags", rs.getString("tags"));
-                    event.put("content", rs.getString("content"));
-                    event.put("sig", rs.getString("sig"));
-                    events.add(event);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    while (rs.next()) {
+                        Map<String, Object> event = new HashMap<>();
+                        event.put("id", rs.getString("id"));
+                        event.put("pubkey", rs.getString("pubkey"));
+                        event.put("kind", rs.getInt("kind"));
+                        event.put("created_at", rs.getLong("created_at"));
+                        event.put("tags", rs.getString("tags"));
+                        event.put("content", rs.getString("content"));
+                        event.put("sig", rs.getString("sig"));
+                        events.add(event);
+                    }
                 }
+                logger.info("Fetched " + events.size() + " events for filters: " + filters);
+            } catch (SQLException e) {
+                logger.severe("Database query failed: " + e.getMessage());
             }
+            return events;
+        }).thenCompose(eventList -> storeInCache(cacheKey, eventList));
+    }
+
+    private CompletableFuture<List<Map<String, Object>>> storeInCache(String cacheKey, List<Map<String, Object>> events) {
+        try {
+            String jsonData = objectMapper.writeValueAsString(events);
+            return redisAsync.setex(cacheKey, 240, jsonData) // Cache for 4 minutes
+                    .toCompletableFuture()
+                    .thenApply(status -> {
+                        if ("OK".equals(status)) {
+                            logger.info("Stored query results in Redis for key: " + cacheKey);
+                        } else {
+                            logger.warning("Failed to store results in Redis.");
+                        }
+                        return events;
+                    }).exceptionally(ex -> {
+                        logger.warning("Redis storage failed: " + ex.getMessage());
+                        return events;
+                    });
+        } catch (JsonProcessingException e) {
+            logger.warning("Failed to serialize query results for Redis: " + e.getMessage());
+            return CompletableFuture.completedFuture(events);
         }
-
-        logger.info("Fetched " + events.size() + " events for filters: " + filters);
-
-        // Store results in Redis cache
-        try (Jedis jedis = jedisPool.getResource()) {
-            jedis.setex(cacheKey, 240, objectMapper.writeValueAsString(events));  // Cache for 4 minutes
-            logger.info("Stored query results in Redis for key: " + cacheKey);
-        } catch (Exception e) {
-            logger.warning("Failed to store results in Redis: " + e.getMessage());
-        }
-
-        return events;
     }
 }
