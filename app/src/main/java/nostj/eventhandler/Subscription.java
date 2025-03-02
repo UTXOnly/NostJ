@@ -117,7 +117,7 @@ public class Subscription {
                     event.put("pubkey", row.getString("pubkey"));
                     event.put("kind", row.getInteger("kind"));
                     event.put("created_at", row.getLong("created_at"));
-                    event.put("tags", row.getJson("tags"));
+                    event.put("tags", row.getJsonArray("tags").getList());
                     event.put("content", row.getString("content"));
                     event.put("sig", row.getString("sig"));
                     results.add(event);
