@@ -15,12 +15,13 @@ import io.lettuce.core.pubsub.RedisPubSubAdapter;
 import io.lettuce.core.pubsub.StatefulRedisPubSubConnection;
 import io.lettuce.core.pubsub.api.async.RedisPubSubAsyncCommands;
 import io.vertx.core.Vertx;
-import io.vertx.sqlclient.*;
+import io.vertx.sqlclient.Pool;
 import nostj.eventhandler.Subscription;
-import nostj.websockethandler.models.WebsocketMessages;
+import nostj.eventhandler.Event;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
 
 public class WebSocketHandler {
@@ -28,6 +29,7 @@ public class WebSocketHandler {
     private static final Logger logger = Logger.getLogger(WebSocketHandler.class.getName());
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final String REDIS_CHANNEL = "new_events_channel";
+    private static final boolean WOT_ENABLED = Boolean.parseBoolean(System.getenv("WOT_ENABLED"));
 
     private final int port;
     private final Pool pgPool;
@@ -155,7 +157,7 @@ public class WebSocketHandler {
                         handleEvent(parsedMessage, channel);
                         break;
                     case "CLOSE":
-                        removeSubscription(parsedMessage, channel);
+                        handleUnsubscribe(parsedMessage, channel);
                         break;
                     default:
                         logger.warning("Unknown event type: " + eventType);
@@ -168,10 +170,10 @@ public class WebSocketHandler {
         private void handleSubscription(List<Object> parsedMessage, Channel channel) {
             String subId = (String) parsedMessage.get(1);
             Map<String, Object> filter = (Map<String, Object>) parsedMessage.get(2);
-        
+
             sessionSubscriptions.computeIfAbsent(channel, k -> new HashSet<>()).add(subId);
             Subscription subscription = new Subscription(filter, redisAsync);
-        
+
             subscription.fetchEvents(pgPool)
                 .thenAccept(events -> {
                     for (Map<String, Object> event : events) {
@@ -184,27 +186,50 @@ public class WebSocketHandler {
                     return null;
                 });
         }
-        
 
         private void handleEvent(List<Object> parsedMessage, Channel channel) {
             try {
-                logger.info("Handling WebSocket event: " + parsedMessage);
-                sendToClient(channel, List.of("EVENT_HANDLED", parsedMessage));
+                Map<String, Object> eventPayload = (Map<String, Object>) parsedMessage.get(1);
+                Event event = new Event(eventPayload);
+
+                if (!event.verifySignature()) {
+                    sendToClient(channel, List.of("OK",event.getId(),"false", "invalid signature"));
+                    return;
+                }
+
+                event.checkWot(pgPool).thenAccept(wotPassed -> {
+                    if (WOT_ENABLED && !wotPassed) {
+                        sendToClient(channel, List.of("OK",event.getId(),"false", "User not in Web of Trust"));
+                        return;
+                    }
+
+                    if (event.getKind() == 5) {
+                        event.deleteEvent(pgPool);
+                        sendToClient(channel, List.of("OK", "Events deleted"));
+                    } else {
+                        event.addEvent(pgPool).thenAccept(inserted -> {
+                            if (inserted) {
+                                redisAsync.publish(REDIS_CHANNEL, event.getEventMap().toString());
+                                sendToClient(channel, List.of("OK", event.getId(), "true", ""));
+                            } else {
+                                sendToClient(channel, List.of("OK",event.getId(),"false", "Duplicate event"));
+                            }
+                        });
+                    }
+                });
+
             } catch (Exception e) {
                 logger.severe("Error handling WebSocket event: " + e.getMessage());
             }
         }
 
-        private void removeSubscription(List<Object> parsedMessage, Channel channel) {
+        private void handleUnsubscribe(List<Object> parsedMessage, Channel channel) {
             String subId = (String) parsedMessage.get(1);
-            Set<String> subscriptions = sessionSubscriptions.get(channel);
-            if (subscriptions != null) {
+            sessionSubscriptions.computeIfPresent(channel, (ch, subscriptions) -> {
                 subscriptions.remove(subId);
-                if (subscriptions.isEmpty()) {
-                    sessionSubscriptions.remove(channel);
-                }
-                logger.info("Removed subscription: " + subId);
-            }
+                return subscriptions.isEmpty() ? null : subscriptions;
+            });
+            logger.info("Unsubscribed: " + subId);
         }
     }
 }
