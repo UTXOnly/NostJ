@@ -13,36 +13,35 @@ repositories {
 }
 
 dependencies {
-    implementation("jakarta.websocket:jakarta.websocket-api:2.1.0")
+    // ✅ OpenTelemetry Core API
+    implementation("io.opentelemetry:opentelemetry-api:1.37.0")
 
-    // Netty for WebSockets
-    implementation("io.netty:netty-all:4.1.100.Final")
+    // ✅ OpenTelemetry SDK for custom manual tracing
+    implementation("io.opentelemetry:opentelemetry-sdk:1.37.0")
+    implementation("io.opentelemetry:opentelemetry-sdk-trace:1.37.0")
 
-    // Async Redis client (Lettuce)
+    // ✅ OpenTelemetry OTLP Exporter (optional, remove if not needed)
+    implementation("io.opentelemetry:opentelemetry-exporter-otlp:1.37.0")
+    implementation("io.opentelemetry.semconv:opentelemetry-semconv:1.30.0")
+
+
+
+    // ✅ Database & Redis
+    implementation("io.vertx:vertx-pg-client:4.5.1")
+    implementation ("com.ongres.scram:client:2.1")
     implementation("io.lettuce:lettuce-core:6.3.2.RELEASE")
 
-    // Database (PostgreSQL)
-    implementation("org.postgresql:postgresql:42.6.0")
-
-    // Connection Pooling (HikariCP) - Fix missing class issue
-    implementation("com.zaxxer:HikariCP:5.0.1")
-
-    // JSON Parsing (Jackson)
+    // ✅ JSON Processing
     implementation("com.fasterxml.jackson.core:jackson-databind:2.16.0")
 
-    // Logging (SLF4J + Logback)
-    implementation("org.slf4j:slf4j-api:2.0.7")
-    implementation("ch.qos.logback:logback-classic:1.4.8")
+    // ✅ Logging
+    implementation("org.slf4j:slf4j-api:2.0.9")
+    implementation("ch.qos.logback:logback-classic:1.4.11")
 
-
-    implementation("io.vertx:vertx-pg-client:4.5.1")
-    implementation ("com.ongres.scram:client:2.1") // Add this for SCRAM support
-
-
-
-    // Unit Testing (JUnit 5)
+    // ✅ Unit Testing (JUnit 5)
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
 }
+
 
 application {
     mainClass.set("nostj.websockethandler.WebSocketApplication")
